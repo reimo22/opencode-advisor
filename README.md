@@ -1,3 +1,32 @@
+> **Fork notice (reimo22/opencode-advisor):** this fork exists to hold a port of
+> [kojoru/opencode-advisor](https://github.com/kojoru/opencode-advisor) to the
+> OpenCode V2 plugin API (`@opencode/plugin`, `Plugin.define` with `ctx.*`
+> domains), which upstream does not have yet (upstream is V1, dormant since
+> 2026-04).
+>
+> - **`v2` branch** — the V2 port of `src/index.ts`. Written from the V2 plugin
+>   docs on 2026-09-16, **not yet runtime-verified**. Also carries a local
+>   patch not in upstream: the advisor model is configurable via plugin
+>   options, `ADVISOR_MODEL` env var, or `.opencode/advisor.json`
+>   (default `anthropic/claude-opus-4-7`). Note: `package-lock.json` on this
+>   branch still reflects the upstream V1 deps — regenerate once
+>   `@opencode/plugin` 2.0.4 passes your npm freshness window.
+> - **`main`** — currently identical to upstream (V1-only, OpenCode 1.x).
+
+---
+> [kojoru/opencode-advisor](https://github.com/kojoru/opencode-advisor) to the
+> OpenCode V2 plugin API (`@opencode/plugin`, `Plugin.define` with `ctx.*`
+> domains), which upstream does not have yet (upstream is V1, dormant since
+> 2026-04).
+>
+> - **`v2` branch** — the V2 port of `src/index.ts`. Written from the V2 plugin
+>   docs on 2026-09-16, **not yet runtime-verified**. Also carries a local
+>   patch not in upstream: the advisor model is configurable via plugin
+>   options, `ADVISOR_MODEL` env var, or `.opencode/advisor.json`
+>   (default `anthropic/claude-opus-4-7`).
+> - **`main`** — currently identical to upstream (V1-only, OpenCode 1.x).
+
+---
 # opencode-advisor
 
 An [opencode](https://opencode.ai) plugin that implements the [advisor strategy](https://claude.com/blog/the-advisor-strategy): a smaller model working on a task gets access to an `ask_advisor` tool that routes questions to a larger, more capable model.

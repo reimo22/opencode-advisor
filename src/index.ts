@@ -1,16 +1,10 @@
-import { tool, type Plugin } from "@opencode-ai/plugin"
-import type {
-  SessionPromptData,
-  SessionMessagesResponses,
-  SessionPromptResponses,
-  Part,
-  TextPart,
-  ToolPart,
-  ToolStateCompleted,
-  ToolStateError,
-} from "@opencode-ai/sdk"
+import { Plugin } from "@opencode/plugin"
 import { readFile } from "fs/promises"
 import { join } from "path"
+
+// V2 port of https://github.com/kojoru/opencode-advisor (src/index.ts).
+// Ported to the V2 plugin API on 2026-09-16 (ctx.session / ctx.tool domains).
+// + local patch: consumes plugin options (model) — not in upstream yet.
 
 const SERVICE = "opencode-advisor"
 
@@ -21,74 +15,104 @@ const ADVISOR_SYSTEM =
   "Provide clear, direct, actionable advice. Be concise — the working model will synthesize your " +
   "response into its next steps. Focus on the single highest-leverage insight or direction."
 
-type Messages = SessionMessagesResponses[200]
-type PromptResponse = SessionPromptResponses[200]
-type PromptBody = NonNullable<SessionPromptData["body"]>
+// Mirror opencode's own transcript format so the advisor sees the same
+// structured view as a human reading the session. Structural types matching
+// the V2 flat message union (SessionMessageInfo in @opencode/client):
+// user/synthetic/system carry `text`; assistant carries `content` items.
 
-// Mirror opencode's own transcript format from
-// packages/opencode/src/cli/cmd/tui/util/transcript.ts
-// so the advisor sees the same structured view as a human reading the session.
+type ToolContent = { type?: string; text?: string }
 
-function formatPart(part: Part, maxToolOutput?: number): string {
-  if (part.type === "text") {
-    const p = part as TextPart
-    if (p.synthetic || !p.text.trim()) return ""
-    return `${p.text}\n\n`
+type ContentItem = {
+  type?: string
+  text?: string
+  name?: string
+  state?: {
+    status?: string
+    input?: unknown
+    content?: ToolContent[]
+    error?: unknown
+  }
+}
+
+type TranscriptMessage = {
+  type?: string
+  text?: string
+  content?: ContentItem[]
+}
+
+function errorText(err: unknown): string {
+  if (typeof err === "string") return err
+  const message = (err as { message?: unknown } | null)?.message
+  return typeof message === "string" ? message : JSON.stringify(err)
+}
+
+function formatContentItem(item: ContentItem, maxToolOutput?: number): string {
+  if (item.type === "text") {
+    if (!item.text?.trim()) return ""
+    return `${item.text}\n\n`
   }
 
-  if (part.type === "tool") {
-    const p = part as ToolPart
-    if (p.tool === "ask_advisor") return "" // skip recursive calls
-    let result = `**Tool: ${p.tool}**\n`
-    if (p.state.input && Object.keys(p.state.input).length > 0) {
-      result += `\n**Input:**\n\`\`\`json\n${JSON.stringify(p.state.input, null, 2)}\n\`\`\`\n`
+  if (item.type === "tool") {
+    if (item.name === "ask_advisor") return "" // skip recursive calls
+    let result = `**Tool: ${item.name}**\n`
+    const state = item.state
+    if (state?.input && typeof state.input === "object" && Object.keys(state.input).length > 0) {
+      result += `\n**Input:**\n\`\`\`json\n${JSON.stringify(state.input, null, 2)}\n\`\`\`\n`
     }
-    if (p.state.status === "completed") {
-      const state = p.state as ToolStateCompleted
-      if (state.output) {
-        const output =
-          maxToolOutput !== undefined && state.output.length > maxToolOutput
-            ? state.output.slice(0, maxToolOutput) + `\n…(truncated, ${state.output.length} chars total)`
-            : state.output
-        result += `\n**Output:**\n\`\`\`\n${output}\n\`\`\`\n`
+    if (state?.status === "completed" && state.content) {
+      const output = state.content
+        .filter((c) => c.type === "text" && c.text)
+        .map((c) => c.text)
+        .join("\n")
+      if (output) {
+        const shown =
+          maxToolOutput !== undefined && output.length > maxToolOutput
+            ? output.slice(0, maxToolOutput) + `\n…(truncated, ${output.length} chars total)`
+            : output
+        result += `\n**Output:**\n\`\`\`\n${shown}\n\`\`\`\n`
       }
     }
-    if (p.state.status === "error") {
-      const state = p.state as ToolStateError
-      result += `\n**Error:**\n\`\`\`\n${state.error}\n\`\`\`\n`
+    if (state?.status === "error" && state.error) {
+      result += `\n**Error:**\n\`\`\`\n${errorText(state.error)}\n\`\`\`\n`
     }
     result += "\n"
     return result
   }
 
-  return ""
+  return "" // reasoning and other content types are skipped
 }
 
-function formatTranscript(messages: Messages, maxToolOutput?: number): string {
+function formatTranscript(messages: readonly TranscriptMessage[], maxToolOutput?: number): string {
   return messages
-    .map(({ info, parts }) => {
-      const header = info.role === "user" ? "## User" : "## Assistant"
-      const body = parts.map((p) => formatPart(p, maxToolOutput)).join("")
-      return body.trim() ? `${header}\n\n${body}` : null
+    .map((message) => {
+      if (message.type === "user" && message.text?.trim()) {
+        return `## User\n\n${message.text}`
+      }
+      if (message.type === "assistant" && message.content) {
+        const body = message.content.map((item) => formatContentItem(item, maxToolOutput)).join("")
+        return body.trim() ? `## Assistant\n\n${body}` : null
+      }
+      return null // synthetic/system/compaction/etc. are skipped
     })
     .filter(Boolean)
     .join("---\n\n")
 }
 
-function parseAdvisorModel(str: string): PromptBody["model"] {
+// "provider/model" — first slash splits (provider IDs contain no slash)
+function parseAdvisorModel(str: string): { providerID: string; id: string } {
   const slash = str.indexOf("/")
   if (slash === -1)
     throw new Error(`Advisor model must be "provider/model" format, got: "${str}"`)
-  return { providerID: str.slice(0, slash), modelID: str.slice(slash + 1) }
+  return { providerID: str.slice(0, slash), id: str.slice(slash + 1) }
 }
 
 type AdvisorConfig = {
-  model: PromptBody["model"]
+  model: { providerID: string; id: string }
   modelSource: string
   maxToolOutput: number | undefined
 }
 
-async function resolveConfig(directory: string): Promise<AdvisorConfig> {
+async function resolveConfig(directory: string, options: Record<string, unknown> = {}): Promise<AdvisorConfig> {
   let fileConfig: Record<string, unknown> = {}
   try {
     const raw = await readFile(join(directory, ".opencode", "advisor.json"), "utf-8")
@@ -96,113 +120,78 @@ async function resolveConfig(directory: string): Promise<AdvisorConfig> {
   } catch { /* no config file — use defaults */ }
 
   const modelStr = process.env.ADVISOR_MODEL
+    ?? (typeof options.model === "string" ? options.model : null)
     ?? (typeof fileConfig.model === "string" ? fileConfig.model : null)
     ?? "anthropic/claude-opus-4-7"
   const modelSource = process.env.ADVISOR_MODEL
     ? "env:ADVISOR_MODEL"
+    : typeof options.model === "string" ? "opencode.jsonc plugin options"
     : fileConfig.model ? ".opencode/advisor.json" : "default"
 
-  const maxToolOutput = typeof fileConfig.maxToolOutput === "number"
-    ? fileConfig.maxToolOutput
-    : undefined
+  const maxToolOutput = typeof options.maxToolOutput === "number"
+    ? options.maxToolOutput
+    : typeof fileConfig.maxToolOutput === "number"
+      ? fileConfig.maxToolOutput
+      : undefined
 
   return { model: parseAdvisorModel(modelStr), modelSource, maxToolOutput }
 }
 
-export const AdvisorPlugin: Plugin = async ({ client, directory }) => {
-  await client.app.log({ body: { service: SERVICE, level: "info", message: "AdvisorPlugin initializing" } })
+export default Plugin.define({
+  id: "opencode-advisor",
+  async setup(ctx) {
+    const directory = ctx.location.directory
+    const config = await resolveConfig(directory, ctx.options as Record<string, unknown>)
+    console.log(`[${SERVICE}] advisor model: ${config.model.providerID}/${config.model.id} (${config.modelSource})`)
 
-  let config: AdvisorConfig
-  try {
-    config = await resolveConfig(directory)
-    await client.app.log({
-      body: {
-        service: SERVICE,
-        level: "info",
-        message: "Advisor config resolved",
-        extra: { ...config.model, source: config.modelSource, maxToolOutput: config.maxToolOutput ?? "none" },
-      },
-    })
-  } catch (err) {
-    await client.app.log({ body: { service: SERVICE, level: "error", message: "Failed to resolve advisor config", extra: { error: String(err) } } })
-    throw err
-  }
-
-  return {
-    tool: {
-      ask_advisor: tool({
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "ask_advisor",
         description:
           "Consult a more powerful model for guidance when you are genuinely stuck, need " +
           "architectural advice, or face a critical decision with non-obvious tradeoffs. " +
           "Use sparingly — only for hard problems where expert input materially changes the outcome. " +
           "Session context is gathered automatically; just state your question.",
-        args: {
-          question: tool.schema.string(),
+        input: {
+          type: "object",
+          properties: { question: { type: "string" } },
+          required: ["question"],
+          additionalProperties: false,
         },
-        async execute({ question }, { sessionID, directory: dir }) {
-          await client.app.log({ body: { service: SERVICE, level: "info", message: "ask_advisor called", extra: { question, sessionID, directory: dir } } })
+        execute: async (input, toolCtx) => {
+          const { question } = input as { question: string }
+          const sessionID = (toolCtx as { sessionID?: string }).sessionID ?? ""
 
           // --- Gather current session transcript ---
           let transcript = ""
           try {
-            const { data: messages, error } = await client.session.messages({ path: { id: sessionID } })
-            if (error) throw error
-            await client.app.log({ body: { service: SERVICE, level: "debug", message: "Transcript fetched", extra: { messageCount: messages!.length } } })
-            transcript = formatTranscript(messages!, config.maxToolOutput)
+            const messages = await ctx.session.context({ sessionID })
+            transcript = formatTranscript(messages, config.maxToolOutput)
           } catch (err) {
-            await client.app.log({ body: { service: SERVICE, level: "warn", message: "Failed to fetch transcript — continuing without it", extra: { error: String(err) } } })
+            console.warn(`[${SERVICE}] Failed to fetch transcript — continuing without it:`, err)
           }
 
-          // --- Create advisor session ---
-          const { data: session, error: sessionError } = await client.session.create({})
-          if (sessionError) {
-            await client.app.log({ body: { service: SERVICE, level: "error", message: "Failed to create advisor session", extra: { error: String(sessionError) } } })
-            throw sessionError
-          }
-          const advisorSessionID = session!.id
-          await client.app.log({ body: { service: SERVICE, level: "debug", message: "Advisor session created", extra: { advisorSessionID } } })
+          // --- Create advisor session, point it at the advisor model ---
+          const advisorSession = await ctx.session.create({ title: "Advisor consultation" })
+          await ctx.session.switchModel({
+            sessionID: advisorSession.id,
+            model: { providerID: config.model.providerID, id: config.model.id },
+          })
 
-          // --- Build prompt and call advisor model synchronously ---
+          // --- Build prompt and call advisor model ---
           const promptText = [
             ADVISOR_SYSTEM,
-            `Working directory: ${dir}`,
+            `Working directory: ${directory}`,
             transcript && `--- Session so far ---\n${transcript}\n--- End of session ---`,
             `Question:\n${question}`,
           ]
             .filter(Boolean)
             .join("\n\n")
 
-          await client.app.log({ body: { service: SERVICE, level: "debug", message: "Sending prompt", extra: { advisorSessionID, promptLength: promptText.length, hasTranscript: transcript.length > 0 } } })
-
-          const { data: response, error: promptError } = await client.session.prompt({
-            path: { id: advisorSessionID },
-            body: {
-              model: config.model,
-              parts: [{ type: "text", text: promptText }],
-            },
-          })
-
-          if (promptError) {
-            await client.app.log({ body: { service: SERVICE, level: "error", message: "Advisor prompt failed", extra: { error: String(promptError), advisorSessionID } } })
-            throw promptError
-          }
-
-          // session.prompt() is synchronous — response includes parts directly
-          const text = (response as PromptResponse).parts
-            .filter((p): p is TextPart => p.type === "text")
-            .map((p) => p.text)
-            .join("\n")
-
-          await client.app.log({ body: { service: SERVICE, level: "info", message: "ask_advisor complete", extra: { responseLength: text.length } } })
-          return text
+          const { text } = await ctx.session.generate({ sessionID: advisorSession.id, prompt: promptText })
+          return { content: text }
         },
-      }),
-    },
-  }
-}
-
-// v1 plugin module format — opencode resolves this via exports["./server"]
-export default {
-  id: "opencode-advisor",
-  server: AdvisorPlugin,
-}
+      })
+    })
+  },
+})
