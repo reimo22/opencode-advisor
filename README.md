@@ -4,17 +4,6 @@
 > domains), which upstream does not have yet (upstream is V1, dormant since
 > 2026-04).
 >
-> - **`main`** — currently identical to upstream (V1-only, OpenCode 1.x).
-> - **`v2` branch** — the V2 port. Written from the V2 plugin docs on
->   2026-09-16, not yet runtime-verified.
-
----
-> **Fork notice (reimo22/opencode-advisor):** this fork exists to hold a port of
-> [kojoru/opencode-advisor](https://github.com/kojoru/opencode-advisor) to the
-> OpenCode V2 plugin API (`@opencode/plugin`, `Plugin.define` with `ctx.*`
-> domains), which upstream does not have yet (upstream is V1, dormant since
-> 2026-04).
->
 > - **`v2` branch** — the V2 port of `src/index.ts`. Written from the V2 plugin
 >   docs on 2026-09-16, **not yet runtime-verified**. Also carries a local
 >   patch not in upstream: the advisor model is configurable via plugin
